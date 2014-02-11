@@ -1,6 +1,7 @@
 require "simple_xlsx_reader/version"
 require 'nokogiri'
 require 'date'
+require 'bigdecimal'
 
 # Rubyzip 1.0 only has different naming, everything else is the same, so let's
 # be flexible so we don't force people into a dependency hell w/ other gems.
@@ -290,8 +291,8 @@ module SimpleXlsxReader
         when 's' # shared string
           options[:shared_strings][value.to_i]
         when 'n' # number
-          f = value.to_f
-          f == f.truncate ? f.truncate : f
+          num = BigDecimal.new(value)
+          num.frac.zero? ? num.to_i : num.to_f
         when 'b'
           value.to_i == 1
         when 'str'
