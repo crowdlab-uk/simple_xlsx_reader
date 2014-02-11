@@ -28,6 +28,16 @@ describe SimpleXlsxReader do
     let(:described_class) { SimpleXlsxReader::Document::Mapper }
 
     describe '::cast' do
+      it 'reads type n as a float when the fractional part is greater than zero' do
+        described_class.cast('1.5', 'n', nil).
+          must_be_same_as 1.5
+      end
+
+      it 'reads type n as an integer when the fractional part is zero' do
+        described_class.cast('1', 'n', nil).
+          must_be_same_as 1
+      end
+
       it 'reads type s as a shared string' do
         described_class.cast('1', 's', nil, :shared_strings => ['a', 'b', 'c']).
           must_equal 'b'
