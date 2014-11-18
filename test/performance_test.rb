@@ -1,4 +1,4 @@
-require 'test_helper'
+require_relative 'test_helper'
 require 'minitest/benchmark'
 
 describe 'SimpleXlsxReader Benchmark' do
@@ -58,8 +58,8 @@ describe 'SimpleXlsxReader Benchmark' do
           </sheetData>
         </worksheet>
       XML
-    )
-    base.at_xpath("/xmlns:worksheet/xmlns:sheetData").add_child(build_row(0))
+    ).remove_namespaces!
+    base.at_xpath("/worksheet/sheetData").add_child(build_row(0))
 
     @xml = SimpleXlsxReader::Document::Xml.new.tap do |xml|
       xml.sheets = [base]
@@ -76,7 +76,7 @@ describe 'SimpleXlsxReader Benchmark' do
             </cellXfs>
           </styleSheet>
         XML
-      )
+      ).remove_namespaces!
     end
 
     # Every new sheet has one more row
@@ -84,8 +84,8 @@ describe 'SimpleXlsxReader Benchmark' do
       sheet = base.clone
 
       range.times do |n|
-        sheet.xpath("/xmlns:worksheet/xmlns:sheetData/xmlns:row").last.
-          add_next_sibling(build_row(n))
+        sheet.xpath("/worksheet/sheetData/row").last.
+          add_next_sibling(build_row(n+1))
       end
 
       @xml.sheets[range] = sheet
@@ -93,19 +93,19 @@ describe 'SimpleXlsxReader Benchmark' do
   end
 
   def self.bench_range
-    bench_exp(1,1000)
+    bench_exp(1,10000)
   end
 
   bench_performance_linear 'parses sheets in linear time', 0.9999 do |n|
 
-    raise "not enough sample data; asked for #{n}, only have #{@xml.sheets.count}"\
+    raise "not enough sample data; asked for #{n}, only have #{@xml.sheets.size}"\
       if @xml.sheets[n].nil?
 
     sheet = SimpleXlsxReader::Document::Mapper.new(@xml).
       parse_sheet('test', @xml.sheets[n])
 
-    raise "sheet didn't parse correctly; expected #{n + 1} rows, got #{sheet.rows.count}"\
-      if sheet.rows.count != n + 1
+    raise "sheet didn't parse correctly; expected #{n + 1} rows, got #{sheet.rows.size}"\
+      if sheet.rows.size != n + 1
   end
 
 end

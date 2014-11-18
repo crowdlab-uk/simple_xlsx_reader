@@ -1,3 +1,20 @@
+### 1.0.1
+
+* Add support for the 1904 date system [zilverline]
+
+### 1.0.0
+
+No changes since 1.0.0.pre. Releasing 1.0.0 since the project has seen a
+few months of stability in terms of bug fix requests, and the API is not
+going to change.
+
+### 1.0.0.pre
+
+* Handle files with blank rows [Brian Hoffman]
+* Preserve seconds when casting datetimes [Rob Newbould]
+* Preserve empty rows (previously would be ommitted)
+* Speed up parsing by ~55%
+
 ### 0.9.8
 
 * Rubyzip 1.0 compatability

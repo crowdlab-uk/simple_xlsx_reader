@@ -75,13 +75,14 @@ module SimpleXlsxReader
       def self.load(file_path)
         self.new.tap do |xml|
           SimpleXlsxReader::Zip.open(file_path) do |zip|
-            xml.workbook       = Nokogiri::XML(zip.read('xl/workbook.xml'))
-            xml.styles         = Nokogiri::XML(zip.read('xl/styles.xml'))
+            xml.workbook = Nokogiri::XML(zip.read('xl/workbook.xml')).remove_namespaces!
+            xml.styles   = Nokogiri::XML(zip.read('xl/styles.xml')).remove_namespaces!
 
             # optional feature used by excel, but not often used by xlsx
             # generation libraries
-            if zip.file.file?('xl/sharedStrings.xml')
-              xml.shared_strings = Nokogiri::XML(zip.read('xl/sharedStrings.xml'))
+            ss_file =  (zip.to_a.map(&:name) & ['xl/sharedStrings.xml','xl/sharedstrings.xml'])[0]
+            if ss_file
+              xml.shared_strings = Nokogiri::XML(zip.read(ss_file)).remove_namespaces!
             end
 
             xml.sheets = []
@@ -91,7 +92,7 @@ module SimpleXlsxReader
               break if !zip.file.file?("xl/worksheets/sheet#{i}.xml")
 
               xml.sheets <<
-                Nokogiri::XML(zip.read("xl/worksheets/sheet#{i}.xml"))
+                Nokogiri::XML(zip.read("xl/worksheets/sheet#{i}.xml")).remove_namespaces!
             end
           end
         end
@@ -101,15 +102,18 @@ module SimpleXlsxReader
     ##
     # For internal use; translates source xml to Sheet objects.
     class Mapper < Struct.new(:xml)
+      DATE_SYSTEM_1900 = Date.new(1899, 12, 30)
+      DATE_SYSTEM_1904 = Date.new(1904, 1, 1)
+
       def load_sheets
-        sheet_toc.each_with_index.map do |(sheet_name, sheet_number), i|
+        sheet_toc.each_with_index.map do |(sheet_name, _sheet_number), i|
           parse_sheet(sheet_name, xml.sheets[i])  # sheet_number is *not* the index into xml.sheets
         end
       end
 
       # Table of contents for the sheets, ex. {'Authors' => 0, ...}
       def sheet_toc
-        xml.workbook.xpath('/xmlns:workbook/xmlns:sheets/xmlns:sheet').
+        xml.workbook.xpath('/workbook/sheets/sheet').
           inject({}) do |acc, sheet|
 
           acc[sheet.attributes['name'].value] =
@@ -121,52 +125,56 @@ module SimpleXlsxReader
 
       def parse_sheet(sheet_name, xsheet)
         sheet = Sheet.new(sheet_name)
+        sheet_width, sheet_height = *sheet_dimensions(xsheet)
 
-        last_column = last_column(xsheet)
-        rownum = -1
-        sheet.rows =
-          xsheet.xpath("/xmlns:worksheet/xmlns:sheetData/xmlns:row").map do |xrow|
-          rownum += 1
+        sheet.rows = Array.new(sheet_height) { Array.new(sheet_width) }
+        xsheet.xpath("/worksheet/sheetData/row/c").each do |xcell|
+          column, row = *xcell.attr('r').match(/([A-Z]+)([0-9]+)/).captures
+          col_idx = column_letter_to_number(column) - 1
+          row_idx = row.to_i - 1
 
-          colname = nil
-          colnum  = -1
-          cells   = []
-          while(colname != last_column) do
-            colname ? colname.next! : colname = 'A'
-            colnum += 1
+          type  = xcell.attributes['t'] &&
+                  xcell.attributes['t'].value
+          style = xcell.attributes['s'] &&
+                  style_types[xcell.attributes['s'].value.to_i]
 
-            xcell = xrow.at_xpath(
-              %(xmlns:c[@r="#{colname + (rownum + 1).to_s}"]))
+          # This is the main performance bottleneck. Using just 'xcell.text'
+          # would be ideal, and makes parsing super-fast. However, there's
+          # other junk in the cell, formula references in particular,
+          # so we really do have to look for specific value nodes.
+          # Maybe there is a really clever way to use xcell.text and parse out
+          # the correct value, but I can't think of one, or an alternative
+          # strategy.
+          #
+          # And yes, this really is faster than using xcell.at_xpath(...),
+          # by about 60%. Odd.
+          xvalue = type == 'inlineStr' ?
+            (xis = xcell.children.find {|c| c.name == 'is'}) && xis.children.find {|c| c.name == 't'} :
+            xcell.children.find {|c| c.name == 'v'}
 
-            # empty 'General' columns might not be in the xml
-            next cells << nil if xcell.nil?
+          cell = begin
+            self.class.cast(xvalue && xvalue.text.strip, type, style,
+                            :shared_strings => shared_strings,
+                            :base_date => base_date)
+          rescue => e
+            if !SimpleXlsxReader.configuration.catch_cell_load_errors
+              error = CellLoadError.new(
+                "Row #{row_idx}, Col #{col_idx}: #{e.message}")
+              error.set_backtrace(e.backtrace)
+              raise error
+            else
+              sheet.load_errors[[row_idx, col_idx]] = e.message
 
-            type  = xcell.attributes['t'] &&
-                    xcell.attributes['t'].value
-            style = xcell.attributes['s'] &&
-                    style_types[xcell.attributes['s'].value.to_i]
-
-            xvalue = type == 'inlineStr' ?
-              xcell.at_xpath('xmlns:is/xmlns:t') : xcell.at_xpath('xmlns:v')
-
-            cells << begin
-              self.class.cast(xvalue && xvalue.text.strip, type, style,
-                              :shared_strings => shared_strings)
-            rescue => e
-              if !SimpleXlsxReader.configuration.catch_cell_load_errors
-                error = CellLoadError.new(
-                  "Row #{rownum}, Col #{colnum}: #{e.message}")
-                error.set_backtrace(e.backtrace)
-                raise error
-              else
-                sheet.load_errors[[rownum, colnum]] = e.message
-
-                xcell.text.strip
-              end
+              xcell.text.strip
             end
           end
 
-          cells
+          # This shouldn't be necessary, but just in case, we'll create
+          # the row so we don't blow up. This means any null rows in between
+          # will be null instead of [null, null, ...]
+          sheet.rows[row_idx] ||= Array.new(sheet_width)
+
+          sheet.rows[row_idx][col_idx] = cell
         end
 
         sheet
@@ -181,17 +189,43 @@ module SimpleXlsxReader
       # and check the column name of the last header row. Obviously this isn't
       # the most robust strategy, but it likely fits 99% of use cases
       # considering it's not a problem with actual excel docs.
-      def last_column(xsheet)
-        dimension = xsheet.at_xpath('/xmlns:worksheet/xmlns:dimension')
+      def last_cell_label(xsheet)
+        dimension = xsheet.at_xpath('/worksheet/dimension')
         if dimension
-          col = dimension.attributes['ref'].value.match(/:([A-Z]*)[1-9]*/)
-          col ? col.captures.first : 'A'
+          col = dimension.attributes['ref'].value.match(/:([A-Z]+[0-9]+)/)
+          col ? col.captures.first : 'A1'
         else
-          last = xsheet.at_xpath("/xmlns:worksheet/xmlns:sheetData/xmlns:row/xmlns:c[last()]")
-          last ? last.attributes['r'].value.match(/([A-Z]*)[1-9]*/).captures.first : 'A'
+          last = xsheet.at_xpath("/worksheet/sheetData/row[last()]/c[last()]")
+          last ? last.attributes['r'].value.match(/([A-Z]+[0-9]+)/).captures.first : 'A1'
         end
       end
 
+      # Returns dimensions (1-indexed)
+      def sheet_dimensions(xsheet)
+        column, row = *last_cell_label(xsheet).match(/([A-Z]+)([0-9]+)/).captures
+        [column_letter_to_number(column), row.to_i]
+      end
+
+      # formula fits an exponential factorial function of the form:
+      # 'A'   = 1
+      # 'B'   = 2
+      # 'Z'   = 26
+      # 'AA'  = 26 * 1  + 1
+      # 'AZ'  = 26 * 1  + 26
+      # 'BA'  = 26 * 2  + 1
+      # 'ZA'  = 26 * 26 + 1
+      # 'ZZ'  = 26 * 26 + 26
+      # 'AAA' = 26 * 26 * 1 + 26 * 1  + 1
+      # 'AAZ' = 26 * 26 * 1 + 26 * 1  + 26
+      # 'ABA' = 26 * 26 * 1 + 26 * 2  + 1
+      # 'BZA' = 26 * 26 * 2 + 26 * 26 + 1
+      def column_letter_to_number(column_letter)
+        pow = -1
+        column_letter.codepoints.to_a.reverse.inject(0) do |acc, charcode|
+          pow += 1
+          acc + 26**pow * (charcode - 64)
+        end
+      end
 
       # Excel doesn't record types for some cells, only its display style, so
       # we have to back out the type from that style.
@@ -209,8 +243,17 @@ module SimpleXlsxReader
       # type.
       def style_types
         @style_types ||=
-          xml.styles.xpath('/xmlns:styleSheet/xmlns:cellXfs/xmlns:xf').map {|xstyle|
-            style_type_by_num_fmt_id(xstyle.attributes['numFmtId'].value)}
+            xml.styles.xpath('/styleSheet/cellXfs/xf').map {|xstyle|
+              style_type_by_num_fmt_id(num_fmt_id(xstyle))}
+      end
+
+      #returns the numFmtId value if it's available
+      def num_fmt_id(xstyle)
+        if xstyle.attributes['numFmtId']
+          xstyle.attributes['numFmtId'].value
+        else
+          nil
+        end
       end
 
       # Finds the type we think a style is; For example, fmtId 14 is a date
@@ -230,7 +273,7 @@ module SimpleXlsxReader
       # ex. {164 => :date_time}
       def custom_style_types
         @custom_style_types ||=
-          xml.styles.xpath('/xmlns:styleSheet/xmlns:numFmts/xmlns:numFmt').
+          xml.styles.xpath('/styleSheet/numFmts/numFmt').
           inject({}) do |acc, xstyle|
 
           acc[xstyle.attributes['numFmtId'].value.to_i] =
@@ -316,10 +359,10 @@ module SimpleXlsxReader
         # the trickiest. note that  all these formats can vary on
         # whether they actually contain a date, time, or datetime.
         when :date, :time, :date_time
-          days_since_1900, fraction_of_24 = value.split('.')
+          days_since_date_system_start, fraction_of_24 = value.split('.')
 
           # http://stackoverflow.com/questions/10559767/how-to-convert-ms-excel-date-from-float-to-date-format-in-ruby
-          date = Date.new(1899, 12, 30) + Integer(days_since_1900)
+          date = options.fetch(:base_date, DATE_SYSTEM_1900) + Integer(days_since_date_system_start)
 
           if fraction_of_24 # there is a time associated
             fraction_of_24 = "0.#{fraction_of_24}".to_f
@@ -343,6 +386,21 @@ module SimpleXlsxReader
         else
           value
         end
+      end
+
+      ## Returns the base_date from which to calculate dates.
+      # Defaults to 1900 (minus two days due to excel quirk), but use 1904 if
+      # it's set in the Workbook's workbookPr.
+      # http://msdn.microsoft.com/en-us/library/ff530155(v=office.12).aspx
+      def base_date
+        @base_date ||=
+          begin
+            return DATE_SYSTEM_1900 if xml.workbook == nil
+            xml.workbook.xpath("//workbook/workbookPr[@date1904]").each do |workbookPr|
+              return DATE_SYSTEM_1904 if workbookPr["date1904"] =~ /true|1/i
+            end
+            DATE_SYSTEM_1900
+          end
       end
 
       # Map of non-custom numFmtId to casting symbol
@@ -389,12 +447,12 @@ module SimpleXlsxReader
       def shared_strings
         @shared_strings ||= begin
           if xml.shared_strings
-            xml.shared_strings.xpath('/xmlns:sst/xmlns:si').map do |xsst|
+            xml.shared_strings.xpath('/sst/si').map do |xsst|
               # a shared string can be a single value...
-              sst = xsst.at_xpath('xmlns:t/text()')
+              sst = xsst.at_xpath('t/text()')
               sst = sst.text if sst
               # ... or a composite of seperately styled words/characters
-              sst ||= xsst.xpath('xmlns:r/xmlns:t/text()').map(&:text).join
+              sst ||= xsst.xpath('r/t/text()').map(&:text).join
             end
           else
             []
