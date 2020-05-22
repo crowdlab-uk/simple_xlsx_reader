@@ -334,7 +334,7 @@ module SimpleXlsxReader
         when 's' # shared string
           options[:shared_strings][value.to_i]
         when 'n' # number
-          num = BigDecimal.new(value)
+          num = BigDecimal(value)
           num.frac.zero? ? num.to_i : num.to_f
         when 'b'
           value.to_i == 1
@@ -374,7 +374,7 @@ module SimpleXlsxReader
           end
         when :bignum
           if defined?(BigDecimal)
-            BigDecimal.new(value)
+            BigDecimal(value)
           else
             value.to_f
           end
