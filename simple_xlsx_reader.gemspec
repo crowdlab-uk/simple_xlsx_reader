@@ -4,7 +4,7 @@ $LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
 require 'simple_xlsx_reader/version'
 
 Gem::Specification.new do |gem|
-  gem.name          = "simple_xlsx_reader"
+  gem.name          = "crowdlab-simple_xlsx_reader"
   gem.version       = SimpleXlsxReader::VERSION
   gem.authors       = ["Woody Peterson"]
   gem.email         = ["woody@sigby.com"]
